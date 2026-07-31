@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Autom8 Support Queue</title>
+  <style>
+    :root { --bg:#f7f7f5; --card:#fff; --border:#e8e8e5; --text:#111; --muted:#888; --danger:#a32d2d; --ok:#3b6d11; --accent:#0f6b5c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+    header { background:#0f3d34; color:#fff; padding:14px 20px; display:flex; gap:12px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    header h1 { margin:0; font-size:16px; font-weight:600; }
+    main { max-width:1100px; margin:0 auto; padding:20px 16px 48px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px; }
+    label { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
+    input, select, textarea, button { font:inherit; }
+    input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:8px; margin-bottom:10px; }
+    button { cursor:pointer; border-radius:8px; border:1px solid var(--border); padding:8px 12px; background:#f0f0ee; }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--border); vertical-align:top; }
+    th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; }
+    tr { cursor:pointer; }
+    tr:hover { background:#fafaf8; }
+    .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; background:#eee; }
+    .pill.escalated { background:#fde8e8; color:var(--danger); }
+    .pill.auto_resolved { background:#e8f5e9; color:var(--ok); }
+    .pill.resolved { background:#eef6ff; color:#185fa5; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
+    .row > div { flex:1; min-width:140px; }
+    .muted { color:var(--muted); font-size:12px; }
+    #detail { display:none; }
+    pre { white-space:pre-wrap; background:#f7f7f5; padding:10px; border-radius:8px; font-size:13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Support queue</h1>
+    <div class="muted">Platform admin · paste JWT from app.autom8.works localStorage authToken</div>
+  </header>
+  <main>
+    <div class="card">
+      <div class="row">
+        <div style="flex:2">
+          <label>Bearer token</label>
+          <input id="token" type="password" placeholder="Paste authToken" />
+        </div>
+        <div>
+          <label>Queue</label>
+          <select id="queue">
+            <option value="actionable">Escalated open</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+        <div>
+          <label>Category</label>
+          <select id="category">
+            <option value="">Any</option>
+            <option>catalog_sync</option>
+            <option>payment_failure</option>
+            <option>kds_printer</option>
+            <option>subscription_billing</option>
+            <option>menu_setup</option>
+            <option>other</option>
+          </select>
+        </div>
+        <div>
+          <button class="primary" id="reload">Load</button>
+        </div>
+      </div>
+      <div id="listStatus" class="muted"></div>
+    </div>
+
+    <div class="card" id="listCard">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Category</th>
+            <th>Resolution</th>
+            <th>Summary</th>
+            <th>Outlet</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="detail">
+      <button id="back">← Back</button>
+      <h2 style="font-size:16px;margin:12px 0 8px">Ticket detail</h2>
+      <div id="detailMeta" class="muted"></div>
+      <h3 style="font-size:13px;margin:14px 0 6px">Message</h3>
+      <pre id="detailMessage"></pre>
+      <h3 style="font-size:13px;margin:14px 0 6px">AI</h3>
+      <pre id="detailAi"></pre>
+      <div class="row">
+        <div>
+          <label>resolution_type</label>
+          <select id="resType">
+            <option value="escalated">escalated</option>
+            <option value="auto_resolved">auto_resolved</option>
+            <option value="resolved">resolved</option>
+          </select>
+        </div>
+        <div>
+          <label>status</label>
+          <select id="status">
+            <option value="open">open</option>
+            <option value="closed">closed</option>
+          </select>
+        </div>
+        <div>
+          <label>assigned_to</label>
+          <input id="assigned" />
+        </div>
+      </div>
+      <label>notes</label>
+      <textarea id="notes" rows="3"></textarea>
+      <button class="primary" id="save">Save</button>
+      <div id="saveStatus" class="muted"></div>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let currentId = null;
+    const API = '';
+
+    function authHeaders() {
+      const t = $('token').value.trim() || localStorage.getItem('supportAdminToken') || '';
+      if (t) localStorage.setItem('supportAdminToken', t);
+      return { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' };
+    }
+
+    function fmt(ts) {
+      try { return new Date(ts).toLocaleString(); } catch { return ts || '—'; }
+    }
+
+    async function loadList() {
+      $('listStatus').textContent = 'Loading…';
+      const q = new URLSearchParams();
+      if ($('queue').value === 'actionable') q.set('queue', 'actionable');
+      if ($('category').value) q.set('category', $('category').value);
+      const res = await fetch(API + '/tickets?' + q.toString(), { headers: authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        $('listStatus').textContent = data.error || ('HTTP ' + res.status);
+        return;
+      }
+      const tickets = data.tickets || [];
+      $('listStatus').textContent = tickets.length + ' ticket(s)';
+      $('tbody').innerHTML = tickets.map(t => `
+        <tr data-id="${t.id}">
+          <td>${fmt(t.created_at)}</td>
+          <td>${t.category || t.ai_category || '—'}</td>
+          <td><span class="pill ${t.resolution_type}">${t.resolution_type}</span></td>
+          <td>${(t.summary || t.message || '').slice(0, 120)}</td>
+          <td class="muted">${(t.restaurant_id || '—').toString().slice(0, 8)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="5" class="muted">No tickets</td></tr>';
+      $('tbody').querySelectorAll('tr[data-id]').forEach(tr => {
+        tr.onclick = () => openDetail(tr.getAttribute('data-id'));
+      });
+
+      const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+      const deep = hash.get('ticket');
+      if (deep) openDetail(deep);
+    }
+
+    async function openDetail(id) {
+      currentId = id;
+      $('listCard').style.display = 'none';
+      $('detail').style.display = 'block';
+      const res = await fetch(API + '/tickets/' + id, { headers: authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        $('detailMeta').textContent = data.error || 'Failed to load';
+        return;
+      }
+      const t = data.ticket;
+      $('detailMeta').textContent = `${t.id} · ${fmt(t.created_at)} · source=${t.source}`;
+      $('detailMessage').textContent = t.message || '';
+      $('detailAi').textContent = JSON.stringify({
+        ai_category: t.ai_category,
+        confidence_score: t.confidence_score,
+        ai_response: t.ai_response,
+        summary: t.summary,
+      }, null, 2);
+      $('resType').value = t.resolution_type || 'escalated';
+      $('status').value = t.status || 'open';
+      $('assigned').value = t.assigned_to || '';
+      $('notes').value = t.notes || '';
+    }
+
+    $('back').onclick = () => {
+      currentId = null;
+      $('detail').style.display = 'none';
+      $('listCard').style.display = 'block';
+      history.replaceState(null, '', location.pathname);
+    };
+
+    $('save').onclick = async () => {
+      if (!currentId) return;
+      $('saveStatus').textContent = 'Saving…';
+      const res = await fetch(API + '/tickets/' + currentId, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          resolution_type: $('resType').value,
+          status: $('status').value,
+          assigned_to: $('assigned').value || null,
+          notes: $('notes').value || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      $('saveStatus').textContent = res.ok ? 'Saved' : (data.error || 'Save failed');
+    };
+
+    $('reload').onclick = loadList;
+    $('token').value = localStorage.getItem('supportAdminToken') || '';
+    if ($('token').value) loadList();
+  </script>
+</body>
+</html>
