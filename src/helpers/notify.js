@@ -49,13 +49,15 @@ async function notifyAdminEscalation(ticket) {
   const supportBase = String(process.env.SUPPORT_PUBLIC_URL || process.env.ADMIN_APP_BASE || appBase).replace(/\/$/, '');
   const link = `${supportBase}/admin#ticket=${ticket.id}`;
   const summary = ticket.summary || ticket.message?.slice(0, 140) || 'New support ticket';
+  const nAttach = Array.isArray(ticket.attachments) ? ticket.attachments.length : 0;
   const text = [
     '🚨 Support escalated',
     `Category: ${ticket.ai_category || ticket.category || 'other'}`,
     `Outlet: ${ticket.restaurant_id || '—'}`,
     summary,
+    nAttach ? `Attachments: ${nAttach} image(s)` : null,
     link,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
   return notifyWhatsApp({ to: phone, message: text, restaurantId: null });
 }
 

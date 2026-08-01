@@ -31,6 +31,13 @@ Copy `.env.example` → `.env`:
 | `FRONTEND_ORIGIN` | no | CORS for SupportChip (`https://app.autom8.works`) |
 | `SUPPORT_PUBLIC_URL` | no | Base URL used in escalation deep links (`/admin#ticket=…`) |
 | `ADMIN_APP_BASE` | no | Fallback link base |
+| `SUPPORT_STORAGE_BUCKET` | no | Supabase Storage bucket (default `support-attachments`) |
+
+### Attachments
+
+1. Run [`migrations/20260802_support_ticket_attachments.sql`](migrations/20260802_support_ticket_attachments.sql) (adds `attachments` jsonb + creates the private Storage bucket).
+2. Dashboard Support chip can attach up to **5** images (JPEG/PNG/WebP/GIF, ≤5 MB each) via multipart field `images`.
+3. Admin detail view shows signed thumbnail links (1 hour).
 
 ```bash
 npm install

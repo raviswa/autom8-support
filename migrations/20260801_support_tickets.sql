@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS public.support_tickets (
   summary text,
   notes text,
   assigned_to text,
+  attachments jsonb NOT NULL DEFAULT '[]'::jsonb,
   status text NOT NULL DEFAULT 'open'
     CHECK (status IN ('open', 'closed')),
   created_at timestamptz NOT NULL DEFAULT now(),

@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const {
   getSupabaseAdmin,
@@ -12,11 +13,41 @@ const {
 } = require('../middleware/auth');
 const { classifyWithGroq, CATEGORIES } = require('../helpers/supportTriage');
 const { notifyWhatsApp, notifyAdminEscalation } = require('../helpers/notify');
+const {
+  MAX_FILES,
+  MAX_BYTES,
+  ALLOWED,
+  uploadTicketImages,
+  withSignedAttachmentUrls,
+} = require('../helpers/attachments');
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_BYTES, files: MAX_FILES },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED.has(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, WebP, or GIF images are allowed'));
+    }
+    cb(null, true);
+  },
+});
 
 function clampInt(v, fallback, min, max) {
   const n = parseInt(v, 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function parseFilesError(err) {
+  if (!err) return null;
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') return 'Each image must be 5 MB or smaller';
+    if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
+      return `Maximum ${MAX_FILES} images allowed`;
+    }
+    return err.message;
+  }
+  return err.message || 'Upload failed';
 }
 
 async function createTicketFromPayload(payload) {
@@ -37,6 +68,7 @@ async function createTicketFromPayload(payload) {
     ai_response: triage.response_or_null,
     resolution_type: triage.resolution_type,
     summary: triage.summary,
+    attachments: [],
     status: triage.resolution_type === 'auto_resolved' ? 'closed' : 'open',
   };
 
@@ -48,82 +80,116 @@ async function createTicketFromPayload(payload) {
     .single();
   if (error) throw error;
 
-  if (data.resolution_type === 'auto_resolved' && data.ai_response && data.customer_phone) {
+  let ticket = data;
+
+  if (payload.files?.length) {
+    try {
+      const attachments = await uploadTicketImages({
+        restaurantId: ticket.restaurant_id,
+        ticketId: ticket.id,
+        files: payload.files,
+      });
+      if (attachments.length) {
+        const { data: updated, error: upErr } = await admin
+          .from('support_tickets')
+          .update({ attachments, updated_at: new Date().toISOString() })
+          .eq('id', ticket.id)
+          .select('*')
+          .single();
+        if (upErr) throw upErr;
+        ticket = updated;
+      }
+    } catch (uploadErr) {
+      console.error('[tickets] attachment upload', uploadErr.message);
+      // Ticket already created — surface soft failure on response
+      ticket = { ...ticket, _attachment_error: uploadErr.message };
+    }
+  }
+
+  if (ticket.resolution_type === 'auto_resolved' && ticket.ai_response && ticket.customer_phone) {
     await notifyWhatsApp({
-      to: data.customer_phone,
-      message: data.ai_response,
-      restaurantId: data.restaurant_id,
+      to: ticket.customer_phone,
+      message: ticket.ai_response,
+      restaurantId: ticket.restaurant_id,
     });
   }
 
-  if (data.resolution_type === 'escalated') {
-    await notifyAdminEscalation(data);
+  if (ticket.resolution_type === 'escalated') {
+    await notifyAdminEscalation(ticket);
   }
 
-  return data;
+  return ticket;
 }
 
 /**
  * POST /tickets
- * - Dashboard: Bearer JWT + { message, category?, restaurant_id?, source: 'dashboard' }
- * - WhatsApp ingest: x-internal-secret + { message, customer_phone, restaurant_id?, source: 'whatsapp' }
+ * JSON or multipart (fields + images[]).
  */
 router.post('/', (req, res) => {
-  const internal = isValidInternalSecret(extractInternalSecret(req));
-  const waIngest = internal && (req.body?.source === 'whatsapp' || req.body?.customer_phone);
+  upload.array('images', MAX_FILES)(req, res, (uploadErr) => {
+    const fileErr = parseFilesError(uploadErr);
+    if (fileErr) return res.status(400).json({ error: fileErr });
 
-  if (waIngest) {
-    (async () => {
-      try {
-        const message = String(req.body?.message || '').trim();
-        if (!message) return res.status(400).json({ error: 'message is required' });
-        const ticket = await createTicketFromPayload({
-          message,
-          customer_phone: String(req.body.customer_phone || '').replace(/\D/g, '') || null,
-          restaurant_id: req.body.restaurant_id || null,
-          source: 'whatsapp',
-          category: req.body.category || null,
-          user_id: null,
-        });
-        return res.status(201).json({ ticket });
-      } catch (err) {
-        console.error('[POST /tickets whatsapp]', err.message);
-        return res.status(500).json({ error: err.message || 'Failed to create ticket' });
-      }
-    })();
-    return;
-  }
+    const internal = isValidInternalSecret(extractInternalSecret(req));
+    const waIngest = internal && (req.body?.source === 'whatsapp' || req.body?.customer_phone);
 
-  authenticateToken(req, res, () => {
-    attachOutletContext(req, res, async () => {
-      try {
-        const message = String(req.body?.message || '').trim();
-        if (!message) return res.status(400).json({ error: 'message is required' });
-
-        const restaurantId = req.body?.restaurant_id || req.restaurant_id || null;
-        if (!restaurantId) {
-          return res.status(400).json({ error: 'restaurant_id is required (select an outlet)' });
+    if (waIngest) {
+      (async () => {
+        try {
+          const message = String(req.body?.message || '').trim();
+          if (!message) return res.status(400).json({ error: 'message is required' });
+          const ticket = await createTicketFromPayload({
+            message,
+            customer_phone: String(req.body.customer_phone || '').replace(/\D/g, '') || null,
+            restaurant_id: req.body.restaurant_id || null,
+            source: 'whatsapp',
+            category: req.body.category || null,
+            user_id: null,
+            files: req.files || [],
+          });
+          return res.status(201).json({ ticket: await withSignedAttachmentUrls(ticket) });
+        } catch (err) {
+          console.error('[POST /tickets whatsapp]', err.message);
+          return res.status(err.status || 500).json({ error: err.message || 'Failed to create ticket' });
         }
+      })();
+      return;
+    }
 
-        const ticket = await createTicketFromPayload({
-          message,
-          category: req.body.category || null,
-          restaurant_id: restaurantId,
-          user_id: req.user.sub,
-          customer_phone: null,
-          source: req.body.source || 'dashboard',
-        });
+    authenticateToken(req, res, () => {
+      attachOutletContext(req, res, async () => {
+        try {
+          const message = String(req.body?.message || '').trim();
+          if (!message) return res.status(400).json({ error: 'message is required' });
 
-        return res.status(201).json({
-          ticket,
-          confirmation: ticket.resolution_type === 'auto_resolved'
-            ? ticket.ai_response
-            : "We've got it — you'll hear back shortly.",
-        });
-      } catch (err) {
-        console.error('[POST /tickets]', err.message);
-        return res.status(500).json({ error: err.message || 'Failed to create ticket' });
-      }
+          const restaurantId = req.body?.restaurant_id || req.restaurant_id || null;
+          if (!restaurantId) {
+            return res.status(400).json({ error: 'restaurant_id is required (select an outlet)' });
+          }
+
+          const ticket = await createTicketFromPayload({
+            message,
+            category: req.body.category || null,
+            restaurant_id: restaurantId,
+            user_id: req.user.sub,
+            customer_phone: null,
+            source: req.body.source || 'dashboard',
+            files: req.files || [],
+          });
+
+          const signed = await withSignedAttachmentUrls(ticket);
+          return res.status(201).json({
+            ticket: signed,
+            confirmation: ticket.resolution_type === 'auto_resolved'
+              ? ticket.ai_response
+              : "We've got it — you'll hear back shortly.",
+            attachment_error: ticket._attachment_error || undefined,
+          });
+        } catch (err) {
+          console.error('[POST /tickets]', err.message);
+          return res.status(err.status || 500).json({ error: err.message || 'Failed to create ticket' });
+        }
+      });
     });
   });
 });
@@ -148,7 +214,8 @@ router.get('/', authenticateToken, requireSupportAdmin, async (req, res) => {
 
     const { data, error, count } = await q;
     if (error) throw error;
-    return res.json({ tickets: data || [], count: count ?? (data || []).length, limit, offset });
+    const tickets = await Promise.all((data || []).map((t) => withSignedAttachmentUrls(t)));
+    return res.json({ tickets, count: count ?? tickets.length, limit, offset });
   } catch (err) {
     console.error('[GET /tickets]', err.message);
     return res.status(500).json({ error: err.message || 'Failed to list tickets' });
@@ -164,7 +231,7 @@ router.get('/:id', authenticateToken, requireSupportAdmin, async (req, res) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Ticket not found' });
-    return res.json({ ticket: data });
+    return res.json({ ticket: await withSignedAttachmentUrls(data) });
   } catch (err) {
     return res.status(500).json({ error: err.message || 'Failed to load ticket' });
   }
@@ -187,7 +254,7 @@ router.patch('/:id', authenticateToken, requireSupportAdmin, async (req, res) =>
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Ticket not found' });
-    return res.json({ ticket: data });
+    return res.json({ ticket: await withSignedAttachmentUrls(data) });
   } catch (err) {
     return res.status(500).json({ error: err.message || 'Failed to update ticket' });
   }
