@@ -74,6 +74,15 @@ Chip posts to `${VITE_SUPPORT_API_URL}/tickets` with the dashboard Bearer JWT.
 - `KNOWN_ANSWERS` starts empty → everything escalates until you fill answers after ~15–20 real tickets.
 - Never auto-resolve `subscription_billing` / `payment_failure`.
 
+## Anti-scrape
+
+- `robots.txt` disallows all crawlers
+- `X-Robots-Tag: noindex, nofollow, …` on every response
+- Known AI/scraper User-Agents (GPTBot, ClaudeBot, CCBot, etc.) get `403` unless the request carries `Authorization` or `x-internal-secret`
+- Admin HTML also has `<meta name="robots" content="noindex,…">`
+
+Ticket APIs remain JWT / secret gated. For CDN-level bot fight (Cloudflare), enable that on the Railway custom domain separately.
+
 ## TODO(scale)
 
 - Replace `SUPPORT_ADMIN_EMAILS` with a `platform_role` column.

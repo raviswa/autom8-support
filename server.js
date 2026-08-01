@@ -5,6 +5,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
+const { antiScrape } = require('./src/middleware/antiScrape');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 8090;
@@ -16,8 +17,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-restaurant-id', 'x-internal-secret'],
 }));
 app.use(express.json({ limit: '1mb' }));
+app.use(antiScrape);
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'autom8-support' }));
+
+app.get('/robots.txt', (_req, res) => {
+  res.type('text/plain').sendFile(path.join(__dirname, 'public', 'robots.txt'));
+});
 
 const ticketsRouter = require('./src/routes/tickets');
 app.use('/tickets', ticketsRouter);
